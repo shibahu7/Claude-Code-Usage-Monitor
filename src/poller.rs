@@ -477,8 +477,12 @@ fn read_codex_credentials_from_source(source: &CodexAccountSource) -> Option<Cod
                     .arg("sh")
                     .arg("-c")
                     .arg(format!(
-                        "cat '{}'",
-                        path.display().to_string().replace('\'', "'\\''")
+                        "cat \"$HOME\"{}",
+                        path.display()
+                            .to_string()
+                            .strip_prefix('~')
+                            .map(|rest| format!("'{}'", rest.replace('\'', "'\\''")))
+                            .unwrap_or_else(|| "'~'".to_string())
                     ))
                     .creation_flags(CREATE_NO_WINDOW)
                     .stdout(std::process::Stdio::piped())
@@ -2042,24 +2046,48 @@ mod tests {
     }
 
     #[test]
-    fn shell_escape_wsl_path_with_spaces() {
-        // Verify that paths with spaces are properly quoted for shell execution
+    fn shell_command_expands_tilde_via_home_var() {
+        // Verify that ~/ is replaced with "$HOME" so tilde expansion works
+        let path = PathBuf::from("~/.codex/auth.json");
+        let cmd = format!(
+            "cat \"$HOME\"{}",
+            path.display()
+                .to_string()
+                .strip_prefix('~')
+                .map(|rest| format!("'{}'", rest.replace('\'', "'\\''")))
+                .unwrap_or_else(|| "'~'".to_string())
+        );
+        assert_eq!(cmd, "cat \"$HOME\"'/.codex/auth.json'");
+        // $HOME is in double quotes so it expands; rest is single-quoted for safety
+    }
+
+    #[test]
+    fn shell_command_escapes_spaces_in_path() {
         let path = PathBuf::from("~/my codex/auth.json");
-        let escaped = path.display().to_string().replace('\'', "'\\''");
-        let cmd = format!("cat '{}'", escaped);
-        // The path should be wrapped in single quotes
-        assert!(cmd.starts_with("cat '"));
-        assert!(cmd.ends_with("'"));
-        // The path content should be preserved
+        let cmd = format!(
+            "cat \"$HOME\"{}",
+            path.display()
+                .to_string()
+                .strip_prefix('~')
+                .map(|rest| format!("'{}'", rest.replace('\'', "'\\''")))
+                .unwrap_or_else(|| "'~'".to_string())
+        );
+        assert!(cmd.contains("$HOME"));
+        assert!(cmd.contains("'"));
         assert!(cmd.contains("my codex/auth.json"));
     }
 
     #[test]
-    fn shell_escape_wsl_path_with_single_quotes() {
-        // Verify that single quotes in paths are properly escaped
+    fn shell_command_escapes_single_quotes_in_path() {
         let path = PathBuf::from("~/codex'work/auth.json");
-        let escaped = path.display().to_string().replace('\'', "'\\''");
-        let cmd = format!("cat '{}'", escaped);
+        let cmd = format!(
+            "cat \"$HOME\"{}",
+            path.display()
+                .to_string()
+                .strip_prefix('~')
+                .map(|rest| format!("'{}'", rest.replace('\'', "'\\''")))
+                .unwrap_or_else(|| "'~'".to_string())
+        );
         // Single quotes should be escaped as '\''
         assert!(cmd.contains("'\\''"));
     }
