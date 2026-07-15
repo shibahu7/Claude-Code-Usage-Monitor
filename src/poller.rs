@@ -476,7 +476,10 @@ fn read_codex_credentials_from_source(source: &CodexAccountSource) -> Option<Cod
                     .arg("--")
                     .arg("sh")
                     .arg("-c")
-                    .arg(format!("cat {}", path.display()))
+                    .arg(format!(
+                        "cat '{}'",
+                        path.display().to_string().replace('\'', "'\\''")
+                    ))
                     .creation_flags(CREATE_NO_WINDOW)
                     .stdout(std::process::Stdio::piped())
                     .stderr(std::process::Stdio::null()),
@@ -2036,5 +2039,28 @@ mod tests {
             },
         });
         assert!(app_is_past_reset(&data));
+    }
+
+    #[test]
+    fn shell_escape_wsl_path_with_spaces() {
+        // Verify that paths with spaces are properly quoted for shell execution
+        let path = PathBuf::from("~/my codex/auth.json");
+        let escaped = path.display().to_string().replace('\'', "'\\''");
+        let cmd = format!("cat '{}'", escaped);
+        // The path should be wrapped in single quotes
+        assert!(cmd.starts_with("cat '"));
+        assert!(cmd.ends_with("'"));
+        // The path content should be preserved
+        assert!(cmd.contains("my codex/auth.json"));
+    }
+
+    #[test]
+    fn shell_escape_wsl_path_with_single_quotes() {
+        // Verify that single quotes in paths are properly escaped
+        let path = PathBuf::from("~/codex'work/auth.json");
+        let escaped = path.display().to_string().replace('\'', "'\\''");
+        let cmd = format!("cat '{}'", escaped);
+        // Single quotes should be escaped as '\''
+        assert!(cmd.contains("'\\''"));
     }
 }

@@ -375,14 +375,16 @@ fn load_settings() -> SettingsFile {
     let mut settings: SettingsFile = serde_json::from_str(&content).unwrap_or_default();
 
     // Backward compat: migrate show_codex to enabled_codex_accounts
+    // Only clear show_codex after at least one account is discovered, so that
+    // a WSL timeout (which returns no accounts) does not lose migration state.
     if settings.show_codex && settings.enabled_codex_accounts.is_empty() {
         let accounts = poller::discover_codex_accounts();
         if let Some(first) = accounts.first() {
             settings
                 .enabled_codex_accounts
                 .push(first.account_id.clone());
+            settings.show_codex = false;
         }
-        settings.show_codex = false;
     }
 
     if !settings.show_claude_code
@@ -1838,7 +1840,12 @@ fn do_poll(send_hwnd: SendHwnd) {
                     s.session_percent = 0.0;
                     s.weekly_percent = 0.0;
                 }
-                // Build codex_accounts display from poll results
+                // Build codex_accounts display from poll results, preserving failed accounts
+                let polled_ids: std::collections::HashSet<_> = data
+                    .codex_accounts
+                    .iter()
+                    .map(|ca| ca.account_id.as_str())
+                    .collect();
                 s.codex_accounts = data
                     .codex_accounts
                     .iter()
@@ -1850,6 +1857,27 @@ fn do_poll(send_hwnd: SendHwnd) {
                         weekly_percent: ca.usage.weekly.percentage,
                         weekly_text: "--".to_string(),
                     })
+                    .chain(s.enabled_codex_accounts.iter().filter_map(|id| {
+                        // Account was enabled but polling failed — preserve display
+                        if polled_ids.contains(id.as_str()) {
+                            return None;
+                        }
+                        // Find label from discovered accounts
+                        let label = s
+                            .discovered_codex_accounts
+                            .iter()
+                            .find(|a| a.account_id == *id)
+                            .map(|a| a.label.clone())
+                            .unwrap_or_else(|| "Codex".to_string());
+                        Some(CodexAccountDisplay {
+                            account_id: id.clone(),
+                            label,
+                            session_percent: 0.0,
+                            session_text: "!".to_string(),
+                            weekly_percent: 0.0,
+                            weekly_text: "!".to_string(),
+                        })
+                    }))
                     .collect();
                 // Also store the raw data for countdown timers
                 s.data = Some(data);
