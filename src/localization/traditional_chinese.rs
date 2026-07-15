@@ -47,4 +47,5 @@ pub(super) const STRINGS: Strings = Strings {
     codex_window_title: "Codex 使用量監控",
     antigravity_window_title: "Antigravity 使用量監控",
     second_suffix: "秒",
+    codex_account_prefix: "Codex",
 };

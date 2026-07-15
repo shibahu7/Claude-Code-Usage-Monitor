@@ -47,4 +47,5 @@ pub(super) const STRINGS: Strings = Strings {
     codex_window_title: "Codex-Nutzungsmonitor",
     antigravity_window_title: "Antigravity-Nutzungsmonitor",
     second_suffix: "s",
+    codex_account_prefix: "Codex",
 };

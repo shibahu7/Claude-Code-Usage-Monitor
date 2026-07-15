@@ -13,6 +13,12 @@ use crate::native_interop::{self, Color, WM_APP_TRAY};
 const CLAUDE_TRAY_ICON_ID: u32 = 1;
 const CODEX_TRAY_ICON_ID: u32 = 2;
 const ANTIGRAVITY_TRAY_ICON_ID: u32 = 3;
+const CODEX_TRAY_ICON_BASE: u32 = 100;
+
+/// Generate a unique tray icon ID for a Codex account by index.
+pub fn codex_tray_icon_id(account_index: usize) -> u32 {
+    CODEX_TRAY_ICON_BASE + (account_index as u32)
+}
 
 /// Menu item ID for toggling widget visibility (used by window.rs context menu).
 pub const IDM_TOGGLE_WIDGET: u16 = 70;
@@ -35,6 +41,9 @@ pub struct TrayIconData {
     pub kind: TrayIconKind,
     pub percent: Option<f64>,
     pub tooltip: String,
+    /// Custom tray icon ID for multi-account support (e.g., multiple Codex accounts).
+    /// If None, uses the default ID for the kind.
+    pub custom_id: Option<u32>,
 }
 
 impl TrayIconKind {
@@ -333,11 +342,22 @@ fn load_embedded_app_icon() -> HICON {
 /// Show a Windows balloon notification from the tray icon.
 /// Used to alert the user when re-authentication is required.
 pub fn notify_balloon(hwnd: HWND, kind: TrayIconKind, title: &str, message: &str) {
+    notify_balloon_with_id(hwnd, kind, None, title, message);
+}
+
+/// Show a Windows balloon notification with a custom icon ID.
+pub fn notify_balloon_with_id(
+    hwnd: HWND,
+    kind: TrayIconKind,
+    custom_id: Option<u32>,
+    title: &str,
+    message: &str,
+) {
     unsafe {
         let mut nid: NOTIFYICONDATAW = std::mem::zeroed();
         nid.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
         nid.hWnd = hwnd;
-        nid.uID = kind.id();
+        nid.uID = icon_id(kind, custom_id);
         nid.uFlags = NIF_INFO;
         nid.dwInfoFlags = NIIF_WARNING;
         copy_wide(title, &mut nid.szInfoTitle);
@@ -361,12 +381,22 @@ fn copy_wide_256(s: &str, buf: &mut [u16; 256]) {
 
 /// Register the tray icon with the shell.
 pub fn add(hwnd: HWND, kind: TrayIconKind, percent: Option<f64>, tooltip: &str) {
+    add_with_id(hwnd, kind, percent, tooltip, None);
+}
+
+fn add_with_id(
+    hwnd: HWND,
+    kind: TrayIconKind,
+    percent: Option<f64>,
+    tooltip: &str,
+    custom_id: Option<u32>,
+) {
     let hicon = create_icon(kind, percent);
     unsafe {
         let mut nid: NOTIFYICONDATAW = std::mem::zeroed();
         nid.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
         nid.hWnd = hwnd;
-        nid.uID = kind.id();
+        nid.uID = icon_id(kind, custom_id);
         nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
         nid.uCallbackMessage = WM_APP_TRAY;
         nid.hIcon = hicon;
@@ -380,12 +410,22 @@ pub fn add(hwnd: HWND, kind: TrayIconKind, percent: Option<f64>, tooltip: &str) 
 
 /// Update the tray icon colour and tooltip to reflect current usage.
 pub fn update(hwnd: HWND, kind: TrayIconKind, percent: Option<f64>, tooltip: &str) {
+    update_with_id(hwnd, kind, percent, tooltip, None);
+}
+
+fn update_with_id(
+    hwnd: HWND,
+    kind: TrayIconKind,
+    percent: Option<f64>,
+    tooltip: &str,
+    custom_id: Option<u32>,
+) {
     let hicon = create_icon(kind, percent);
     unsafe {
         let mut nid: NOTIFYICONDATAW = std::mem::zeroed();
         nid.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
         nid.hWnd = hwnd;
-        nid.uID = kind.id();
+        nid.uID = icon_id(kind, custom_id);
         nid.uFlags = NIF_ICON | NIF_TIP;
         nid.hIcon = hicon;
         copy_to_tip(tooltip, &mut nid.szTip);
@@ -398,45 +438,54 @@ pub fn update(hwnd: HWND, kind: TrayIconKind, percent: Option<f64>, tooltip: &st
 
 /// Remove the tray icon from the shell.
 pub fn remove(hwnd: HWND, kind: TrayIconKind) {
+    remove_with_id(hwnd, kind.id());
+}
+
+fn remove_with_id(hwnd: HWND, id: u32) {
     unsafe {
         let mut nid: NOTIFYICONDATAW = std::mem::zeroed();
         nid.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
         nid.hWnd = hwnd;
-        nid.uID = kind.id();
+        nid.uID = id;
         let _ = Shell_NotifyIconW(NIM_DELETE, &nid);
     }
 }
 
-pub fn sync(hwnd: HWND, icons: &[TrayIconData]) {
-    let show_claude = icons
-        .iter()
-        .find(|icon| matches!(icon.kind, TrayIconKind::Claude));
-    let show_codex = icons
-        .iter()
-        .find(|icon| matches!(icon.kind, TrayIconKind::Codex));
-    let show_antigravity = icons
-        .iter()
-        .find(|icon| matches!(icon.kind, TrayIconKind::Antigravity));
+fn icon_id(kind: TrayIconKind, custom_id: Option<u32>) -> u32 {
+    custom_id.unwrap_or_else(|| kind.id())
+}
 
-    if let Some(icon) = show_claude {
-        add(hwnd, icon.kind, icon.percent, &icon.tooltip);
-        update(hwnd, icon.kind, icon.percent, &icon.tooltip);
-    } else {
+pub fn sync(hwnd: HWND, icons: &[TrayIconData]) {
+    // Collect all kinds that should be present
+    let mut present_ids: Vec<(TrayIconKind, Option<u32>)> = Vec::new();
+    for icon in icons {
+        present_ids.push((icon.kind, icon.custom_id));
+        add_with_id(hwnd, icon.kind, icon.percent, &icon.tooltip, icon.custom_id);
+        update_with_id(hwnd, icon.kind, icon.percent, &icon.tooltip, icon.custom_id);
+    }
+
+    // Remove any icons not in the current list
+    // Claude: always one
+    if !present_ids
+        .iter()
+        .any(|(k, _)| matches!(k, TrayIconKind::Claude))
+    {
         remove(hwnd, TrayIconKind::Claude);
     }
-
-    if let Some(icon) = show_codex {
-        add(hwnd, icon.kind, icon.percent, &icon.tooltip);
-        update(hwnd, icon.kind, icon.percent, &icon.tooltip);
-    } else {
-        remove(hwnd, TrayIconKind::Codex);
-    }
-
-    if let Some(icon) = show_antigravity {
-        add(hwnd, icon.kind, icon.percent, &icon.tooltip);
-        update(hwnd, icon.kind, icon.percent, &icon.tooltip);
-    } else {
+    // Antigravity: always one
+    if !present_ids
+        .iter()
+        .any(|(k, _)| matches!(k, TrayIconKind::Antigravity))
+    {
         remove(hwnd, TrayIconKind::Antigravity);
+    }
+    // Codex: may have multiple custom IDs; remove default if no Codex at all
+    let codex_icons: Vec<&TrayIconData> = icons
+        .iter()
+        .filter(|i| matches!(i.kind, TrayIconKind::Codex))
+        .collect();
+    if codex_icons.is_empty() {
+        remove(hwnd, TrayIconKind::Codex);
     }
 }
 

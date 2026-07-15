@@ -11,7 +11,7 @@ use std::os::windows::process::CommandExt;
 
 use crate::diagnose;
 use crate::localization::Strings;
-use crate::models::{AppUsageData, UsageData, UsageSection};
+use crate::models::{AppUsageData, CodexAccountUsage, UsageData, UsageSection};
 
 const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
 const MESSAGES_URL: &str = "https://api.anthropic.com/v1/messages";
@@ -42,6 +42,21 @@ pub enum CredentialWatchMode {
 }
 
 pub type CredentialWatchSnapshot = Vec<String>;
+
+/// A discovered Codex account with a stable identifier and human-readable label.
+#[derive(Clone, Debug)]
+pub struct CodexAccount {
+    pub account_id: String,
+    pub label: String,
+    pub source: CodexAccountSource,
+}
+
+/// Where a Codex account's auth.json lives.
+#[derive(Clone, Debug)]
+pub enum CodexAccountSource {
+    Windows(PathBuf),
+    Wsl { distro: String, path: PathBuf },
+}
 
 #[derive(Deserialize)]
 struct UsageResponse {
@@ -173,30 +188,29 @@ extern "system" {
 
 pub fn poll(
     show_claude_code: bool,
-    show_codex: bool,
+    enabled_codex_accounts: &[String],
     show_antigravity: bool,
 ) -> Result<AppUsageData, PollError> {
     poll_with(
         show_claude_code,
-        show_codex,
+        enabled_codex_accounts,
         show_antigravity,
         poll_claude_code,
-        poll_codex,
         poll_antigravity,
     )
 }
 
 fn poll_with(
     show_claude_code: bool,
-    show_codex: bool,
+    enabled_codex_accounts: &[String],
     show_antigravity: bool,
     mut poll_claude_code: impl FnMut() -> Result<UsageData, PollError>,
-    mut poll_codex: impl FnMut() -> Result<UsageData, PollError>,
     mut poll_antigravity: impl FnMut() -> Result<UsageData, PollError>,
 ) -> Result<AppUsageData, PollError> {
     let mut data = AppUsageData::default();
     let mut first_error = None;
-    let active_provider_count = show_claude_code as u8 + show_codex as u8 + show_antigravity as u8;
+    let active_provider_count =
+        show_claude_code as u8 + enabled_codex_accounts.len() as u8 + show_antigravity as u8;
 
     if show_claude_code {
         match poll_claude_code() {
@@ -210,12 +224,26 @@ fn poll_with(
         }
     }
 
-    if show_codex {
-        match poll_codex() {
-            Ok(codex) => data.codex = Some(codex),
+    // Poll each enabled Codex account independently
+    let all_accounts = discover_codex_accounts();
+    for account in &all_accounts {
+        if !enabled_codex_accounts.contains(&account.account_id) {
+            continue;
+        }
+        match poll_codex_account(account) {
+            Ok(usage) => {
+                data.codex_accounts.push(CodexAccountUsage {
+                    account_id: account.account_id.clone(),
+                    label: account.label.clone(),
+                    usage,
+                });
+            }
             Err(error) => {
                 if active_provider_count > 1 {
-                    diagnose::log(format!("Codex usage poll failed: {error:?}"));
+                    diagnose::log(format!(
+                        "Codex usage poll failed for {}: {error:?}",
+                        account.label
+                    ));
                 }
                 first_error.get_or_insert(error);
             }
@@ -234,7 +262,7 @@ fn poll_with(
         }
     }
 
-    if data.claude_code.is_none() && data.codex.is_none() && data.antigravity.is_none() {
+    if data.claude_code.is_none() && data.codex_accounts.is_empty() && data.antigravity.is_none() {
         Err(first_error.unwrap_or(PollError::RequestFailed))
     } else {
         Ok(data)
@@ -255,11 +283,158 @@ fn poll_claude_code() -> Result<UsageData, PollError> {
     fetch_usage_with_fallback(&creds.access_token)
 }
 
-fn poll_codex() -> Result<UsageData, PollError> {
-    let creds = match read_codex_credentials() {
+/// Discover all available Codex accounts from local and WSL sources.
+pub fn discover_codex_accounts() -> Vec<CodexAccount> {
+    let mut accounts = Vec::new();
+    let mut seen_ids = std::collections::HashSet::new();
+
+    // 1. Check CODEX_HOME/auth.json
+    if let Some(path) = std::env::var_os("CODEX_HOME").map(PathBuf::from) {
+        let auth_path = path.join("auth.json");
+        if auth_path.exists() {
+            let account_id = format!("win:{}", sanitize_path_for_id(&auth_path));
+            if seen_ids.insert(account_id.clone()) {
+                accounts.push(CodexAccount {
+                    account_id,
+                    label: "Codex (CODEX_HOME)".to_string(),
+                    source: CodexAccountSource::Windows(auth_path),
+                });
+            }
+        }
+    }
+
+    // 2. Check ~/.codex/auth.json
+    if let Some(home) = dirs::home_dir() {
+        let auth_path = home.join(".codex").join("auth.json");
+        if auth_path.exists() {
+            let account_id = format!("win:{}", sanitize_path_for_id(&auth_path));
+            if seen_ids.insert(account_id.clone()) {
+                accounts.push(CodexAccount {
+                    account_id,
+                    label: "Codex (Windows)".to_string(),
+                    source: CodexAccountSource::Windows(auth_path),
+                });
+            }
+        }
+
+        // 3. Check ~/.codex-*/auth.json (glob)
+        let codex_dir = home.join(".codex");
+        if let Ok(entries) = std::fs::read_dir(&home) {
+            for entry in entries.filter_map(|e| e.ok()) {
+                let name = entry.file_name();
+                let name_str = name.to_string_lossy();
+                if name_str.starts_with(".codex-") && name_str != ".codex" {
+                    let auth_path = entry.path().join("auth.json");
+                    if auth_path.exists() {
+                        let suffix = name_str.strip_prefix(".codex-").unwrap_or("");
+                        let account_id = format!("win:{}", sanitize_path_for_id(&auth_path));
+                        if seen_ids.insert(account_id.clone()) {
+                            accounts.push(CodexAccount {
+                                account_id,
+                                label: format!("Codex (Windows: {suffix})"),
+                                source: CodexAccountSource::Windows(auth_path),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        let _ = codex_dir;
+    }
+
+    // 4. For each WSL distro, check ~/.codex/auth.json and ~/.codex-*/auth.json
+    for distro in list_wsl_distros() {
+        // ~/.codex/auth.json
+        if let Some(output) = run_with_timeout(
+            Command::new("wsl.exe")
+                .arg("-d")
+                .arg(&distro)
+                .arg("--")
+                .arg("sh")
+                .arg("-c")
+                .arg("test -f ~/.codex/auth.json && echo exists || echo missing")
+                .creation_flags(CREATE_NO_WINDOW)
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null()),
+            Duration::from_secs(5),
+        ) {
+            if output.status.success() {
+                let stdout = decode_wsl_text(&output.stdout).trim().to_string();
+                if stdout == "exists" {
+                    let account_id = format!("wsl:{distro}:~/.codex/auth.json");
+                    if seen_ids.insert(account_id.clone()) {
+                        accounts.push(CodexAccount {
+                            account_id,
+                            label: format!("Codex ({distro})"),
+                            source: CodexAccountSource::Wsl {
+                                distro: distro.clone(),
+                                path: PathBuf::from(format!("~/.codex/auth.json")),
+                            },
+                        });
+                    }
+                }
+            }
+        }
+
+        // ~/.codex-*/auth.json
+        if let Some(output) = run_with_timeout(
+            Command::new("wsl.exe")
+                .arg("-d")
+                .arg(&distro)
+                .arg("--")
+                .arg("sh")
+                .arg("-c")
+                .arg(
+                    r#"for d in ~/.codex-*/; do
+                        [ -f "$d/auth.json" ] && basename "$d" | sed 's/^\.codex-//'
+                    done"#,
+                )
+                .creation_flags(CREATE_NO_WINDOW)
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null()),
+            Duration::from_secs(5),
+        ) {
+            if output.status.success() {
+                let stdout = decode_wsl_text(&output.stdout);
+                for line in stdout.lines() {
+                    let suffix = line.trim().to_string();
+                    if !suffix.is_empty() {
+                        let account_id = format!("wsl:{distro}:~/.codex-{suffix}/auth.json");
+                        if seen_ids.insert(account_id.clone()) {
+                            accounts.push(CodexAccount {
+                                account_id,
+                                label: format!("Codex ({distro}: {suffix})"),
+                                source: CodexAccountSource::Wsl {
+                                    distro: distro.clone(),
+                                    path: PathBuf::from(format!("~/.codex-{suffix}/auth.json")),
+                                },
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // If only one account total, label it simply "Codex" for backward compat
+    if accounts.len() == 1 {
+        accounts[0].label = "Codex".to_string();
+    }
+
+    accounts
+}
+
+/// Poll a single Codex account and return usage data.
+/// Returns None if credentials cannot be read or are empty.
+/// Returns Err if the API call fails.
+pub fn poll_codex_account(account: &CodexAccount) -> Result<UsageData, PollError> {
+    let creds = match read_codex_credentials_from_source(&account.source) {
         Some(creds) => creds,
         None => {
-            diagnose::log("Codex usage poll failed: no Codex credentials found");
+            diagnose::log(format!(
+                "Codex usage poll failed for {}: no credentials found",
+                account.label
+            ));
             return Err(PollError::NoCredentials);
         }
     };
@@ -267,12 +442,69 @@ fn poll_codex() -> Result<UsageData, PollError> {
     match fetch_codex_usage(&creds.access_token, creds.account_id.as_deref()) {
         Ok(data) => Ok(data),
         Err(PollError::AuthRequired) => {
+            // For WSL accounts: do NOT attempt CLI refresh
+            if matches!(account.source, CodexAccountSource::Wsl { .. }) {
+                diagnose::log(format!(
+                    "Codex auth failed for WSL account {}; no auto-refresh for WSL",
+                    account.label
+                ));
+                return Err(PollError::AuthRequired);
+            }
+            // For Windows accounts: attempt CLI refresh
             cli_refresh_codex_token();
-            let refreshed = read_codex_credentials().ok_or(PollError::TokenExpired)?;
+            let refreshed = read_codex_credentials_from_source(&account.source)
+                .ok_or(PollError::TokenExpired)?;
             fetch_codex_usage(&refreshed.access_token, refreshed.account_id.as_deref())
         }
         Err(error) => Err(error),
     }
+}
+
+/// Read Codex credentials from a CodexAccountSource.
+fn read_codex_credentials_from_source(source: &CodexAccountSource) -> Option<CodexTokenData> {
+    match source {
+        CodexAccountSource::Windows(path) => {
+            let content = std::fs::read_to_string(path).ok()?;
+            let auth: CodexAuthFile = serde_json::from_str(&content).ok()?;
+            auth.tokens.filter(|t| !t.access_token.is_empty())
+        }
+        CodexAccountSource::Wsl { distro, path } => {
+            let output = run_with_timeout(
+                Command::new("wsl.exe")
+                    .arg("-d")
+                    .arg(distro)
+                    .arg("--")
+                    .arg("sh")
+                    .arg("-c")
+                    .arg(format!("cat {}", path.display()))
+                    .creation_flags(CREATE_NO_WINDOW)
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::null()),
+                Duration::from_secs(5),
+            )?;
+
+            if !output.status.success() {
+                return None;
+            }
+
+            let content = String::from_utf8(output.stdout).ok()?;
+            let auth: CodexAuthFile = serde_json::from_str(&content).ok()?;
+            auth.tokens.filter(|t| !t.access_token.is_empty())
+        }
+    }
+}
+
+/// Sanitize a path for use in an account ID (replace \ with /, remove home prefix).
+fn sanitize_path_for_id(path: &PathBuf) -> String {
+    let path_str = path.to_string_lossy().replace('\\', "/");
+    // Remove home directory prefix for stability
+    if let Some(home) = dirs::home_dir() {
+        let home_str = home.to_string_lossy().replace('\\', "/");
+        if let Some(stripped) = path_str.strip_prefix(&home_str) {
+            return stripped.to_string();
+        }
+    }
+    path_str
 }
 
 fn poll_antigravity() -> Result<UsageData, PollError> {
@@ -1224,34 +1456,6 @@ fn read_credentials_from_source(source: &CredentialSource) -> Option<Credentials
     }
 }
 
-fn codex_auth_path() -> Option<PathBuf> {
-    if let Some(codex_home) = std::env::var_os("CODEX_HOME").map(PathBuf::from) {
-        return Some(codex_home.join("auth.json"));
-    }
-
-    Some(dirs::home_dir()?.join(".codex").join("auth.json"))
-}
-
-fn read_codex_credentials() -> Option<CodexTokenData> {
-    let auth_path = codex_auth_path()?;
-    let content = match std::fs::read_to_string(&auth_path) {
-        Ok(content) => content,
-        Err(error) => {
-            diagnose::log_error(
-                &format!(
-                    "unable to read Codex credentials at {}",
-                    auth_path.display()
-                ),
-                error,
-            );
-            return None;
-        }
-    };
-
-    let auth: CodexAuthFile = serde_json::from_str(&content).ok()?;
-    auth.tokens.filter(|tokens| !tokens.access_token.is_empty())
-}
-
 fn read_antigravity_credentials() -> Option<AntigravityTokenData> {
     let content = read_windows_generic_credential(ANTIGRAVITY_CREDENTIAL_TARGET)?;
     let auth: AntigravityAuthFile = serde_json::from_str(&content).ok()?;
@@ -1596,7 +1800,7 @@ pub fn is_past_reset(data: &UsageData) -> bool {
 
 pub fn app_is_past_reset(data: &AppUsageData) -> bool {
     data.claude_code.as_ref().is_some_and(is_past_reset)
-        || data.codex.as_ref().is_some_and(is_past_reset)
+        || data.codex_accounts.iter().any(|a| is_past_reset(&a.usage))
         || data.antigravity.as_ref().is_some_and(is_past_reset)
 }
 
@@ -1615,45 +1819,56 @@ mod tests {
     }
 
     #[test]
-    fn claude_failure_does_not_block_codex_when_both_are_enabled() {
+    fn claude_success_with_no_codex_accounts() {
         let data = poll_with(
             true,
-            true,
+            &[],
             false,
-            || Err(PollError::AuthRequired),
             || Ok(usage_with_session_percent(42.0)),
-            || unreachable!("antigravity is disabled"),
-        )
-        .expect("codex data should keep the poll successful");
-
-        assert!(data.claude_code.is_none());
-        assert_eq!(data.codex.unwrap().session.percentage, 42.0);
-    }
-
-    #[test]
-    fn codex_failure_does_not_block_claude_when_both_are_enabled() {
-        let data = poll_with(
-            true,
-            true,
-            false,
-            || Ok(usage_with_session_percent(64.0)),
-            || Err(PollError::RequestFailed),
             || unreachable!("antigravity is disabled"),
         )
         .expect("claude data should keep the poll successful");
 
+        assert_eq!(data.claude_code.unwrap().session.percentage, 42.0);
+        assert!(data.codex_accounts.is_empty());
+    }
+
+    #[test]
+    fn claude_failure_returns_error_when_no_other_provider() {
+        let error = poll_with(
+            true,
+            &[],
+            false,
+            || Err(PollError::AuthRequired),
+            || unreachable!("antigravity is disabled"),
+        )
+        .expect_err("claude-only failure should return an error");
+
+        assert_eq!(error, PollError::AuthRequired);
+    }
+
+    #[test]
+    fn antigravity_failure_does_not_block_claude_when_both_are_enabled() {
+        let data = poll_with(
+            true,
+            &[],
+            true,
+            || Ok(usage_with_session_percent(64.0)),
+            || Err(PollError::NoCredentials),
+        )
+        .expect("claude data should keep the poll successful");
+
         assert_eq!(data.claude_code.unwrap().session.percentage, 64.0);
-        assert!(data.codex.is_none());
+        assert!(data.antigravity.is_none());
     }
 
     #[test]
     fn returns_first_error_when_no_enabled_provider_succeeds() {
         let error = poll_with(
             true,
-            true,
+            &[],
             true,
             || Err(PollError::AuthRequired),
-            || Err(PollError::RequestFailed),
             || Err(PollError::NoCredentials),
         )
         .expect_err("all-provider failure should return an error");
@@ -1662,19 +1877,36 @@ mod tests {
     }
 
     #[test]
-    fn antigravity_failure_does_not_block_codex_when_both_are_enabled() {
-        let data = poll_with(
-            false,
-            true,
-            true,
-            || unreachable!("claude code is disabled"),
-            || Ok(usage_with_session_percent(42.0)),
-            || Err(PollError::NoCredentials),
-        )
-        .expect("codex data should keep the poll successful");
+    fn codex_accounts_structure() {
+        let account_usage = CodexAccountUsage {
+            account_id: "win:~/.codex/auth.json".to_string(),
+            label: "Codex".to_string(),
+            usage: usage_with_session_percent(55.0),
+        };
+        assert_eq!(account_usage.account_id, "win:~/.codex/auth.json");
+        assert_eq!(account_usage.label, "Codex");
+        assert_eq!(account_usage.usage.session.percentage, 55.0);
+    }
 
-        assert!(data.antigravity.is_none());
-        assert_eq!(data.codex.unwrap().session.percentage, 42.0);
+    #[test]
+    fn app_is_past_reset_checks_codex_accounts() {
+        let mut data = AppUsageData::default();
+        assert!(!app_is_past_reset(&data));
+
+        // Add a Codex account with past reset
+        let past = SystemTime::now() - Duration::from_secs(60);
+        data.codex_accounts.push(CodexAccountUsage {
+            account_id: "test".to_string(),
+            label: "Test".to_string(),
+            usage: UsageData {
+                session: UsageSection {
+                    percentage: 50.0,
+                    resets_at: Some(past),
+                },
+                weekly: UsageSection::default(),
+            },
+        });
+        assert!(app_is_past_reset(&data));
     }
 
     #[test]
