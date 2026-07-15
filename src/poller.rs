@@ -384,10 +384,13 @@ pub fn discover_codex_accounts() -> Vec<CodexAccount> {
                 .arg("--")
                 .arg("sh")
                 .arg("-c")
+                // NOTE: A `for d in ~/.codex-*/` loop yields an empty loop
+                // variable when run through the wsl.exe interop path (the glob
+                // matches, but `$d` comes back empty), so suffixed accounts were
+                // never discovered. Use a glob passed directly to `ls` plus `sed`
+                // to extract the suffix, which works over interop.
                 .arg(
-                    r#"for d in ~/.codex-*/; do
-                        [ -f "$d/auth.json" ] && basename "$d" | sed 's/^\.codex-//'
-                    done"#,
+                    r#"ls -d ~/.codex-*/auth.json 2>/dev/null | sed 's#.*/\.codex-##; s#/auth\.json##'"#,
                 )
                 .creation_flags(CREATE_NO_WINDOW)
                 .stdout(std::process::Stdio::piped())
