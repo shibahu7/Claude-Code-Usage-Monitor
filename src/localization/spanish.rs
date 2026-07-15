@@ -39,7 +39,6 @@ pub(super) const STRINGS: Strings = Strings {
     minute_suffix: "m",
     token_expired_title: "Error de autenticación",
     token_expired_body: "Ejecuta 'claude' en una terminal, luego usa '/login' y sigue las indicaciones. Después, actualiza o reinicia esta aplicación.",
-    codex_token_expired_title: "Error de autenticacion de Codex",
     codex_token_expired_body: "Ejecuta 'codex' en una terminal y sigue las indicaciones de inicio de sesion. Despues, actualiza o reinicia esta aplicacion.",
     antigravity_token_expired_title: "Error de autenticacion de Antigravity",
     antigravity_token_expired_body: "Abre Antigravity e inicia sesion otra vez. Despues, actualiza o reinicia esta aplicacion.",

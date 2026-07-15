@@ -18,7 +18,7 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::diagnose;
 use crate::localization::{self, LanguageId, Strings};
-use crate::models::{AppUsageData, CodexAccountUsage};
+use crate::models::AppUsageData;
 use crate::native_interop::{
     self, Color, TIMER_COUNTDOWN, TIMER_POLL, TIMER_RESET_POLL, TIMER_UPDATE_CHECK, WM_APP_TRAY,
     WM_APP_USAGE_UPDATED,
@@ -2017,7 +2017,7 @@ fn do_poll(send_hwnd: SendHwnd) {
                     show_claude_code,
                     enabled_codex_accounts,
                     discovered_codex_accounts,
-                    show_antigravity,
+                    _show_antigravity,
                 )) = notify_info
                 {
                     if show_claude_code {

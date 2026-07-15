@@ -39,7 +39,6 @@ pub(super) const STRINGS: Strings = Strings {
     minute_suffix: "분",
     token_expired_title: "인증 오류",
     token_expired_body: "터미널에서 'claude'를 실행한 다음 '/login'을 사용하고 안내에 따라 진행하세요. 그런 다음 이 앱을 새로 고치거나 다시 시작하세요.",
-    codex_token_expired_title: "Codex 인증 오류",
     codex_token_expired_body: "터미널에서 'codex'를 실행하고 로그인 안내를 따르세요. 그런 다음 이 앱을 새로 고치거나 다시 시작하세요.",
     antigravity_token_expired_title: "Antigravity 인증 오류",
     antigravity_token_expired_body: "Antigravity를 열고 다시 로그인하세요. 그런 다음 이 앱을 새로 고치거나 다시 시작하세요.",

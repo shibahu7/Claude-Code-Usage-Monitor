@@ -381,7 +381,7 @@ fn copy_wide_256(s: &str, buf: &mut [u16; 256]) {
 }
 
 /// Register the tray icon with the shell.
-pub fn add(hwnd: HWND, kind: TrayIconKind, percent: Option<f64>, tooltip: &str) {
+fn add(hwnd: HWND, kind: TrayIconKind, percent: Option<f64>, tooltip: &str) {
     add_with_id(hwnd, kind, percent, tooltip, None);
 }
 
@@ -410,7 +410,7 @@ fn add_with_id(
 }
 
 /// Update the tray icon colour and tooltip to reflect current usage.
-pub fn update(hwnd: HWND, kind: TrayIconKind, percent: Option<f64>, tooltip: &str) {
+fn update(hwnd: HWND, kind: TrayIconKind, percent: Option<f64>, tooltip: &str) {
     update_with_id(hwnd, kind, percent, tooltip, None);
 }
 
@@ -438,7 +438,7 @@ fn update_with_id(
 }
 
 /// Remove the tray icon from the shell.
-pub fn remove(hwnd: HWND, kind: TrayIconKind) {
+fn remove(hwnd: HWND, kind: TrayIconKind) {
     remove_with_id(hwnd, kind.id());
 }
 

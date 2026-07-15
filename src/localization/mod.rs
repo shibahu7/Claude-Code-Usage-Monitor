@@ -174,7 +174,6 @@ pub struct Strings {
     pub second_suffix: &'static str,
     pub token_expired_title: &'static str,
     pub token_expired_body: &'static str,
-    pub codex_token_expired_title: &'static str,
     pub codex_token_expired_body: &'static str,
     pub antigravity_token_expired_title: &'static str,
     pub antigravity_token_expired_body: &'static str,

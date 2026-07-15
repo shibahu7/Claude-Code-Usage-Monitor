@@ -39,7 +39,6 @@ pub(super) const STRINGS: Strings = Strings {
     minute_suffix: "m",
     token_expired_title: "Claude Code-authenticatiefout",
     token_expired_body: "Voer 'claude' uit in een terminal, gebruik daarna '/login' en volg de stappen. Ververs of herstart de app daarna.",
-    codex_token_expired_title: "Codex-authenticatiefout",
     codex_token_expired_body: "Voer 'codex' uit in een terminal en volg de aanmeldstappen. Ververs of herstart de app daarna.",
     antigravity_token_expired_title: "Antigravity-authenticatiefout",
     antigravity_token_expired_body: "Open Antigravity en meld je opnieuw aan. Ververs of herstart de app daarna.",

@@ -40,7 +40,6 @@ pub(super) const STRINGS: Strings = Strings {
     second_suffix: "с",
     token_expired_title: "Ошибка авторизации Claude Code",
     token_expired_body: "Запустите 'claude' в терминале, затем используйте '/login' и следуйте инструкциям. После этого обновите или перезапустите приложение.",
-    codex_token_expired_title: "Ошибка авторизации Codex",
     codex_token_expired_body: "Запустите 'codex' в терминале и следуйте инструкциям для входа. После этого обновите или перезапустите приложение.",
     antigravity_token_expired_title: "Ошибка авторизации Antigravity",
     antigravity_token_expired_body: "Откройте Antigravity и войдите снова. После этого обновите или перезапустите приложение.",

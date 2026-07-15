@@ -39,7 +39,6 @@ pub(super) const STRINGS: Strings = Strings {
     minute_suffix: "m",
     token_expired_title: "Authentifizierungsfehler",
     token_expired_body: "Führen Sie 'claude' in einem Terminal aus, verwenden Sie dann '/login' und folgen Sie den Anweisungen. Aktualisieren oder starten Sie diese App anschließend neu.",
-    codex_token_expired_title: "Codex-Authentifizierungsfehler",
     codex_token_expired_body: "Fuhren Sie 'codex' in einem Terminal aus und folgen Sie den Anmeldeanweisungen. Aktualisieren oder starten Sie diese App anschliessend neu.",
     antigravity_token_expired_title: "Antigravity-Authentifizierungsfehler",
     antigravity_token_expired_body: "Offnen Sie Antigravity und melden Sie sich erneut an. Aktualisieren oder starten Sie diese App anschliessend neu.",
