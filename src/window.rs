@@ -12,7 +12,9 @@ use windows::Win32::System::Registry::*;
 use windows::Win32::System::Threading::{CreateMutexW, WaitForSingleObject};
 use windows::Win32::UI::Accessibility::HWINEVENTHOOK;
 use windows::Win32::UI::HiDpi::*;
-use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT,
+};
 use windows::Win32::UI::Shell::ExtractIconExW;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
@@ -89,6 +91,11 @@ struct AppState {
     drag_start_offset: i32,
 
     widget_visible: bool,
+
+    // Hover tooltip that shows the model/account name for the hovered block.
+    tip_hwnd: Option<SendHwnd>,
+    tip_text: String,
+    tip_visible: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -1116,6 +1123,10 @@ fn set_startup_enabled(enable: bool) {
 }
 
 // Dimensions matching the C# version
+// WM_MOUSELEAVE lives in Win32::UI::Controls (a feature we don't enable), so
+// define it locally to avoid pulling in that module.
+const WM_MOUSELEAVE: u32 = 0x02A3;
+
 const SEGMENT_W: i32 = 10;
 const SEGMENT_H: i32 = 13;
 const SEGMENT_GAP: i32 = 1;
@@ -1205,6 +1216,222 @@ fn total_widget_width() -> i32 {
             .unwrap_or(1)
     };
     total_widget_width_for(active_models)
+}
+
+/// Which model/account label sits under `client_x` in the widget, if any.
+/// Column order matches the paint order: Claude, each Codex account, Antigravity.
+fn ordered_model_label(s: &AppState, client_x: i32) -> Option<String> {
+    if is_drag_handle_point(client_x, sc(WIDGET_HEIGHT) / 2) {
+        return None;
+    }
+    let active = (s.show_claude_code as i32
+        + s.codex_accounts.len() as i32
+        + s.show_antigravity as i32)
+        .max(1);
+    let stride = model_usage_width(row_bar_segment_count(active)) + sc(MODEL_RIGHT_MARGIN);
+    if stride <= 0 {
+        return None;
+    }
+    let model_x0 = sc(LEFT_DIVIDER_W)
+        + sc(DIVIDER_RIGHT_MARGIN)
+        + sc(LABEL_WIDTH)
+        + sc(LABEL_RIGHT_MARGIN);
+    let rel = client_x - model_x0;
+    if rel < 0 {
+        return None;
+    }
+    let idx = (rel / stride) as usize;
+
+    let mut labels: Vec<String> = Vec::new();
+    if s.show_claude_code {
+        labels.push(s.language.strings().claude_code_model.to_string());
+    }
+    for ca in &s.codex_accounts {
+        labels.push(ca.label.clone());
+    }
+    if s.show_antigravity {
+        labels.push(s.language.strings().antigravity_model.to_string());
+    }
+    labels.get(idx).cloned()
+}
+
+fn create_tip_font() -> HFONT {
+    unsafe {
+        let font_name = native_interop::wide_str("Segoe UI");
+        CreateFontW(
+            sc(-12),
+            0,
+            0,
+            0,
+            FW_NORMAL.0 as i32,
+            0,
+            0,
+            0,
+            DEFAULT_CHARSET.0 as u32,
+            OUT_TT_PRECIS.0 as u32,
+            CLIP_DEFAULT_PRECIS.0 as u32,
+            CLEARTYPE_QUALITY.0 as u32,
+            (DEFAULT_PITCH.0 | FF_DONTCARE.0) as u32,
+            PCWSTR::from_raw(font_name.as_ptr()),
+        )
+    }
+}
+
+unsafe fn measure_tip(text: &str) -> (i32, i32) {
+    let hdc = GetDC(HWND::default());
+    let font = create_tip_font();
+    let old = SelectObject(hdc, font);
+    let wide: Vec<u16> = text.encode_utf16().collect();
+    let mut size = SIZE::default();
+    let _ = GetTextExtentPoint32W(hdc, &wide, &mut size);
+    SelectObject(hdc, old);
+    let _ = DeleteObject(font);
+    ReleaseDC(HWND::default(), hdc);
+    (size.cx + sc(12), size.cy + sc(6))
+}
+
+unsafe fn show_tip(tip_hwnd: HWND, text: &str) {
+    let (w, h) = measure_tip(text);
+    {
+        let mut state = lock_state();
+        if let Some(s) = state.as_mut() {
+            s.tip_text = text.to_string();
+            s.tip_visible = true;
+        }
+    }
+    let mut pt = POINT::default();
+    let _ = GetCursorPos(&mut pt);
+    // Position above the cursor so the popup never sits under it (which would
+    // pull the mouse off the widget and cause show/hide flicker).
+    let x = pt.x + sc(10);
+    let y = pt.y - h - sc(8);
+    let _ = SetWindowPos(
+        tip_hwnd,
+        HWND_TOPMOST,
+        x,
+        y,
+        w,
+        h,
+        SWP_NOACTIVATE | SWP_SHOWWINDOW,
+    );
+    let _ = InvalidateRect(tip_hwnd, None, TRUE);
+}
+
+unsafe fn hide_tip() {
+    let tip_hwnd = {
+        let mut state = lock_state();
+        match state.as_mut() {
+            Some(s) if s.tip_visible => {
+                s.tip_visible = false;
+                s.tip_hwnd.as_ref().map(|h| h.to_hwnd())
+            }
+            _ => return,
+        }
+    };
+    if let Some(th) = tip_hwnd {
+        let _ = ShowWindow(th, SW_HIDE);
+    }
+}
+
+unsafe fn do_hover_tip(hwnd: HWND, lparam: LPARAM) {
+    // Re-arm WM_MOUSELEAVE (one-shot) so the popup hides when the cursor leaves.
+    let mut tme = TRACKMOUSEEVENT {
+        cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+        dwFlags: TME_LEAVE,
+        hwndTrack: hwnd,
+        dwHoverTime: 0,
+    };
+    let _ = TrackMouseEvent(&mut tme);
+
+    let client_x = (lparam.0 & 0xFFFF) as i16 as i32;
+    let (tip_hwnd, label) = {
+        let state = lock_state();
+        let s = match state.as_ref() {
+            Some(s) => s,
+            None => return,
+        };
+        (
+            s.tip_hwnd.as_ref().map(|h| h.to_hwnd()),
+            ordered_model_label(s, client_x),
+        )
+    };
+    let Some(tip_hwnd) = tip_hwnd else {
+        return;
+    };
+    match label {
+        Some(text) => show_tip(tip_hwnd, &text),
+        None => hide_tip(),
+    }
+}
+
+unsafe extern "system" fn tip_wnd_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    match msg {
+        // HTTRANSPARENT: the popup must never capture the mouse.
+        WM_NCHITTEST => LRESULT(-1),
+        WM_PAINT => {
+            let (text, is_dark) = {
+                let state = lock_state();
+                match state.as_ref() {
+                    Some(s) => (s.tip_text.clone(), s.is_dark),
+                    None => (String::new(), false),
+                }
+            };
+            let mut ps = PAINTSTRUCT::default();
+            let hdc = BeginPaint(hwnd, &mut ps);
+            let mut rect = RECT::default();
+            let _ = GetClientRect(hwnd, &mut rect);
+
+            let (bg, fg, border) = if is_dark {
+                (
+                    native_interop::colorref(45, 45, 45),
+                    native_interop::colorref(240, 240, 240),
+                    native_interop::colorref(90, 90, 90),
+                )
+            } else {
+                (
+                    native_interop::colorref(255, 255, 255),
+                    native_interop::colorref(30, 30, 30),
+                    native_interop::colorref(160, 160, 160),
+                )
+            };
+
+            let bg_brush = CreateSolidBrush(COLORREF(bg));
+            FillRect(hdc, &rect, bg_brush);
+            let _ = DeleteObject(bg_brush);
+
+            let border_brush = CreateSolidBrush(COLORREF(border));
+            let _ = FrameRect(hdc, &rect, border_brush);
+            let _ = DeleteObject(border_brush);
+
+            let _ = SetBkMode(hdc, TRANSPARENT);
+            let _ = SetTextColor(hdc, COLORREF(fg));
+            let font = create_tip_font();
+            let old_font = SelectObject(hdc, font);
+            let mut wide: Vec<u16> = text.encode_utf16().collect();
+            let mut trect = RECT {
+                left: sc(6),
+                top: 0,
+                right: rect.right,
+                bottom: rect.bottom,
+            };
+            DrawTextW(
+                hdc,
+                &mut wide,
+                &mut trect,
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+            );
+            SelectObject(hdc, old_font);
+            let _ = DeleteObject(font);
+            let _ = EndPaint(hwnd, &ps);
+            LRESULT(0)
+        }
+        _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+    }
 }
 
 fn claude_accent_color() -> Color {
@@ -1362,6 +1589,35 @@ pub fn run() {
 
         diagnose::log(format!("main window created hwnd={:?}", hwnd));
 
+        // Hover tooltip popup (self-drawn) that names the hovered model block.
+        let tip_class = native_interop::wide_str("CcumTipClass");
+        let tip_wc = WNDCLASSEXW {
+            cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
+            style: CS_HREDRAW | CS_VREDRAW,
+            lpfnWndProc: Some(tip_wnd_proc),
+            hInstance: HINSTANCE(hinstance.0),
+            hCursor: LoadCursorW(HINSTANCE::default(), IDC_ARROW).unwrap_or_default(),
+            hbrBackground: HBRUSH(std::ptr::null_mut()),
+            lpszClassName: PCWSTR::from_raw(tip_class.as_ptr()),
+            ..Default::default()
+        };
+        let _ = RegisterClassExW(&tip_wc);
+        let tip_hwnd = CreateWindowExW(
+            WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TOPMOST,
+            PCWSTR::from_raw(tip_class.as_ptr()),
+            PCWSTR::null(),
+            WS_POPUP,
+            0,
+            0,
+            0,
+            0,
+            HWND::default(),
+            HMENU::default(),
+            hinstance,
+            None,
+        )
+        .ok();
+
         let is_dark = theme::is_dark_mode();
         let mut embedded = false;
 
@@ -1407,6 +1663,9 @@ pub fn run() {
                 drag_start_client_x: 0,
                 drag_start_offset: 0,
                 widget_visible: settings.widget_visible,
+                tip_hwnd: tip_hwnd.map(SendHwnd::from_hwnd),
+                tip_text: String::new(),
+                tip_visible: false,
             });
         }
 
@@ -2485,6 +2744,7 @@ unsafe extern "system" fn wnd_proc(
             DefWindowProcW(hwnd, msg, wparam, lparam)
         }
         WM_LBUTTONDOWN => {
+            hide_tip();
             let client_x = (lparam.0 & 0xFFFF) as i16 as i32;
             let client_y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
             if !is_drag_handle_point(client_x, client_y) {
@@ -2596,7 +2856,13 @@ unsafe extern "system" fn wnd_proc(
                         native_interop::move_window(hwnd_val, x, y, widget_width, widget_height);
                     }
                 }
+            } else {
+                do_hover_tip(hwnd, lparam);
             }
+            LRESULT(0)
+        }
+        WM_MOUSELEAVE => {
+            hide_tip();
             LRESULT(0)
         }
         WM_LBUTTONUP => {
