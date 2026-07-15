@@ -711,8 +711,21 @@ fn refresh_usage_texts(state: &mut AppState) {
             .iter()
             .find(|a| a.account_id == display.account_id)
         {
-            display.session_text = poller::format_line(&ca.usage.session, strings);
-            display.weekly_text = poller::format_line(&ca.usage.weekly, strings);
+            // A window that is absent (e.g. no active 5h limit during a
+            // weekly-only period) arrives as 0% with no reset time. Show "--"
+            // rather than a misleading "0%", matching the Antigravity handling.
+            display.session_text =
+                if ca.usage.session.resets_at.is_none() && ca.usage.session.percentage == 0.0 {
+                    "--".to_string()
+                } else {
+                    poller::format_line(&ca.usage.session, strings)
+                };
+            display.weekly_text =
+                if ca.usage.weekly.resets_at.is_none() && ca.usage.weekly.percentage == 0.0 {
+                    "--".to_string()
+                } else {
+                    poller::format_line(&ca.usage.weekly, strings)
+                };
         } else if state.enabled_codex_accounts.contains(&display.account_id) {
             display.session_text = "!".to_string();
             display.weekly_text = "!".to_string();

@@ -96,6 +96,10 @@ struct CodexRateLimitDetails {
 struct CodexRateLimitWindow {
     used_percent: f64,
     reset_at: i64,
+    /// Length of the rate-limit window in seconds (e.g. 18000 for the 5h
+    /// window, 604800 for the weekly one). Absent on older responses.
+    #[serde(default)]
+    limit_window_seconds: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -1082,12 +1086,29 @@ fn codex_usage_from_response(response: CodexUsageResponse) -> Option<UsageData> 
     let details = *response.rate_limit.flatten()?;
     let mut data = UsageData::default();
 
+    // Codex's primary/secondary assignment is not stable: during a period with
+    // no 5h limit the weekly window (limit_window_seconds == 604800) arrives as
+    // `primary_window`. Route each window by its actual duration instead of
+    // trusting the primary/secondary slot. Windows up to ~1 day are the short
+    // ("5h") session window; longer ones are the weekly window. When the
+    // duration is absent (older responses) fall back to the legacy positional
+    // mapping (primary -> session, secondary -> weekly).
+    const SESSION_MAX_SECONDS: i64 = 24 * 60 * 60;
+
     if let Some(window) = details.primary_window.flatten() {
-        data.session = codex_section_from_window(&window);
+        let section = codex_section_from_window(&window);
+        match window.limit_window_seconds {
+            Some(secs) if secs > SESSION_MAX_SECONDS => data.weekly = section,
+            _ => data.session = section,
+        }
     }
 
     if let Some(window) = details.secondary_window.flatten() {
-        data.weekly = codex_section_from_window(&window);
+        let section = codex_section_from_window(&window);
+        match window.limit_window_seconds {
+            Some(secs) if secs <= SESSION_MAX_SECONDS => data.session = section,
+            _ => data.weekly = section,
+        }
     }
 
     Some(data)
