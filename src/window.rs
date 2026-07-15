@@ -66,6 +66,7 @@ struct AppState {
     antigravity_weekly_text: String,
     show_claude_code: bool,
     enabled_codex_accounts: Vec<String>,
+    discovered_codex_accounts: Vec<poller::CodexAccount>,
     show_antigravity: bool,
 
     data: Option<AppUsageData>,
@@ -126,7 +127,6 @@ const IDM_LANG_TRADITIONAL_CHINESE: u16 = 48;
 const IDM_LANG_RUSSIAN: u16 = 49;
 const IDM_LANG_PORTUGUESE_BRAZIL: u16 = 50;
 const IDM_MODEL_CLAUDE_CODE: u16 = 60;
-const IDM_MODEL_CODEX: u16 = 61;
 const IDM_MODEL_ANTIGRAVITY: u16 = 62;
 /// Base menu item ID for dynamic Codex account toggles (200+).
 const IDM_CODEX_ACCOUNT_BASE: u16 = 200;
@@ -407,6 +407,17 @@ fn save_settings(settings: &SettingsFile) {
 fn save_state_settings() {
     let state = lock_state();
     if let Some(s) = state.as_ref() {
+        let valid_ids: std::collections::HashSet<_> = s
+            .discovered_codex_accounts
+            .iter()
+            .map(|a| a.account_id.as_str())
+            .collect();
+        let valid_enabled: Vec<String> = s
+            .enabled_codex_accounts
+            .iter()
+            .filter(|id| valid_ids.contains(id.as_str()))
+            .cloned()
+            .collect();
         save_settings(&SettingsFile {
             tray_offset: s.tray_offset,
             taskbar_index: s.taskbar_index,
@@ -419,7 +430,7 @@ fn save_state_settings() {
             show_claude_code: s.show_claude_code,
             show_codex: false,
             show_antigravity: s.show_antigravity,
-            enabled_codex_accounts: s.enabled_codex_accounts.clone(),
+            enabled_codex_accounts: valid_enabled,
         });
     }
 }
@@ -479,7 +490,8 @@ fn tray_icon_data_from_state() -> Vec<tray_icon::TrayIconData> {
                 });
             }
             for (i, account_id) in s.enabled_codex_accounts.iter().enumerate() {
-                let label = poller::discover_codex_accounts()
+                let label = s
+                    .discovered_codex_accounts
                     .iter()
                     .find(|a| a.account_id == *account_id)
                     .map(|a| a.label.clone())
@@ -1361,6 +1373,7 @@ pub fn run() {
                 antigravity_weekly_text: "--".to_string(),
                 show_claude_code: settings.show_claude_code,
                 enabled_codex_accounts: settings.enabled_codex_accounts,
+                discovered_codex_accounts: poller::discover_codex_accounts(),
                 show_antigravity: settings.show_antigravity,
                 data: None,
                 poll_interval_ms: settings.poll_interval_ms,
@@ -1807,8 +1820,17 @@ fn do_poll(send_hwnd: SendHwnd) {
 
     match poller::poll(show_claude_code, &enabled_codex_accounts, show_antigravity) {
         Ok(data) => {
+            let discovered = poller::discover_codex_accounts();
             let mut state = lock_state();
             if let Some(s) = state.as_mut() {
+                s.discovered_codex_accounts = discovered;
+                let valid_ids: std::collections::HashSet<_> = s
+                    .discovered_codex_accounts
+                    .iter()
+                    .map(|a| a.account_id.as_str())
+                    .collect();
+                s.enabled_codex_accounts
+                    .retain(|id| valid_ids.contains(id.as_str()));
                 if let Some(claude_code) = data.claude_code.as_ref() {
                     s.session_percent = claude_code.session.percentage;
                     s.weekly_percent = claude_code.weekly.percentage;
@@ -1950,35 +1972,59 @@ fn do_poll(send_hwnd: SendHwnd) {
             };
 
             if notify_auth_error {
-                let balloon = {
+                let notify_info = {
                     let state = lock_state();
                     state.as_ref().map(|s| {
-                        if s.show_claude_code {
-                            (
-                                s.language.strings(),
-                                tray_icon::TrayIconKind::Claude,
-                                s.language.strings().token_expired_title,
-                                s.language.strings().token_expired_body,
-                            )
-                        } else if !s.enabled_codex_accounts.is_empty() {
-                            (
-                                s.language.strings(),
-                                tray_icon::TrayIconKind::Codex,
-                                s.language.strings().codex_token_expired_title,
-                                s.language.strings().codex_token_expired_body,
-                            )
-                        } else {
-                            (
-                                s.language.strings(),
-                                tray_icon::TrayIconKind::Antigravity,
-                                s.language.strings().antigravity_token_expired_title,
-                                s.language.strings().antigravity_token_expired_body,
-                            )
-                        }
+                        (
+                            s.language.strings(),
+                            s.show_claude_code,
+                            s.enabled_codex_accounts.clone(),
+                            s.discovered_codex_accounts.clone(),
+                            s.show_antigravity,
+                        )
                     })
                 };
-                if let Some((_strings, kind, title, body)) = balloon {
-                    tray_icon::notify_balloon(hwnd, kind, title, body);
+                if let Some((
+                    strings,
+                    show_claude_code,
+                    enabled_codex_accounts,
+                    discovered_codex_accounts,
+                    show_antigravity,
+                )) = notify_info
+                {
+                    if show_claude_code {
+                        tray_icon::notify_balloon(
+                            hwnd,
+                            tray_icon::TrayIconKind::Claude,
+                            strings.token_expired_title,
+                            strings.token_expired_body,
+                        );
+                    } else if !enabled_codex_accounts.is_empty() {
+                        for (i, account_id) in enabled_codex_accounts.iter().enumerate() {
+                            let label = discovered_codex_accounts
+                                .iter()
+                                .find(|a| a.account_id == *account_id)
+                                .map(|a| a.label.clone())
+                                .unwrap_or_else(|| "Codex".to_string());
+                            let title =
+                                format!("{} Auth Error - {}", strings.codex_account_prefix, label);
+                            let custom_id = Some(tray_icon::codex_tray_icon_id(i));
+                            tray_icon::notify_balloon_with_id(
+                                hwnd,
+                                tray_icon::TrayIconKind::Codex,
+                                custom_id,
+                                &title,
+                                strings.codex_token_expired_body,
+                            );
+                        }
+                    } else {
+                        tray_icon::notify_balloon(
+                            hwnd,
+                            tray_icon::TrayIconKind::Antigravity,
+                            strings.antigravity_token_expired_title,
+                            strings.antigravity_token_expired_body,
+                        );
+                    }
                 }
             }
 
@@ -2700,9 +2746,9 @@ unsafe extern "system" fn wnd_proc(
                     {
                         let mut state = lock_state();
                         if let Some(s) = state.as_mut() {
-                            let all_accounts = poller::discover_codex_accounts();
-                            if account_index < all_accounts.len() {
-                                let account_id = &all_accounts[account_index].account_id;
+                            if account_index < s.discovered_codex_accounts.len() {
+                                let account_id =
+                                    &s.discovered_codex_accounts[account_index].account_id;
                                 let is_enabled = s.enabled_codex_accounts.contains(account_id);
 
                                 // Prevent disabling the last model
@@ -2817,6 +2863,7 @@ fn show_context_menu(hwnd: HWND) {
             widget_visible,
             show_claude_code,
             enabled_codex_accounts,
+            discovered_codex_accounts,
             show_antigravity,
         ) = {
             let state = lock_state();
@@ -2831,6 +2878,7 @@ fn show_context_menu(hwnd: HWND) {
                     s.widget_visible,
                     s.show_claude_code,
                     s.enabled_codex_accounts.clone(),
+                    s.discovered_codex_accounts.clone(),
                     s.show_antigravity,
                 ),
                 None => (
@@ -2842,6 +2890,7 @@ fn show_context_menu(hwnd: HWND) {
                     UpdateStatus::Idle,
                     true,
                     true,
+                    Vec::new(),
                     Vec::new(),
                     false,
                 ),
@@ -2905,8 +2954,7 @@ fn show_context_menu(hwnd: HWND) {
         );
 
         // Dynamic Codex account toggles
-        let all_codex_accounts = poller::discover_codex_accounts();
-        for (i, account) in all_codex_accounts.iter().enumerate() {
+        for (i, account) in discovered_codex_accounts.iter().enumerate() {
             let is_enabled = enabled_codex_accounts.contains(&account.account_id);
             let menu_id = (IDM_CODEX_ACCOUNT_BASE as u32 + i as u32) as usize;
             let codex_label = native_interop::wide_str(&account.label);

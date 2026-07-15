@@ -14,6 +14,7 @@ const CLAUDE_TRAY_ICON_ID: u32 = 1;
 const CODEX_TRAY_ICON_ID: u32 = 2;
 const ANTIGRAVITY_TRAY_ICON_ID: u32 = 3;
 const CODEX_TRAY_ICON_BASE: u32 = 100;
+const MAX_CODEX_ACCOUNTS: u32 = 100;
 
 /// Generate a unique tray icon ID for a Codex account by index.
 pub fn codex_tray_icon_id(account_index: usize) -> u32 {
@@ -480,18 +481,24 @@ pub fn sync(hwnd: HWND, icons: &[TrayIconData]) {
         remove(hwnd, TrayIconKind::Antigravity);
     }
     // Codex: may have multiple custom IDs; remove default if no Codex at all
-    let codex_icons: Vec<&TrayIconData> = icons
+    let codex_count = icons
         .iter()
         .filter(|i| matches!(i.kind, TrayIconKind::Codex))
-        .collect();
-    if codex_icons.is_empty() {
+        .count();
+    if codex_count == 0 {
         remove(hwnd, TrayIconKind::Codex);
+    }
+    // Remove any Codex icons beyond the current count (e.g., user disabled one)
+    for i in codex_count..MAX_CODEX_ACCOUNTS as usize {
+        remove_with_id(hwnd, codex_tray_icon_id(i));
     }
 }
 
 pub fn remove_all(hwnd: HWND) {
     remove(hwnd, TrayIconKind::Claude);
-    remove(hwnd, TrayIconKind::Codex);
+    for i in 0..MAX_CODEX_ACCOUNTS {
+        remove_with_id(hwnd, codex_tray_icon_id(i as usize));
+    }
     remove(hwnd, TrayIconKind::Antigravity);
 }
 

@@ -1964,4 +1964,77 @@ mod tests {
         assert!(usage.weekly.resets_at.is_some());
         assert!(usage.session.resets_at.is_some());
     }
+
+    #[test]
+    fn sanitize_path_for_id_stable() {
+        let path = PathBuf::from("/home/user/.codex-work/auth.json");
+        let id1 = sanitize_path_for_id(&path);
+        let id2 = sanitize_path_for_id(&path);
+        assert_eq!(id1, id2);
+    }
+
+    #[test]
+    fn codex_account_source_debug() {
+        let source = CodexAccountSource::Windows(PathBuf::from("/home/user/.codex/auth.json"));
+        let debug = format!("{:?}", source);
+        assert!(debug.contains("Windows"));
+        // Verify no token data is leaked in debug output
+        assert!(!debug.contains("token"));
+    }
+
+    #[test]
+    fn app_usage_data_default_has_empty_codex_accounts() {
+        let data = AppUsageData::default();
+        assert!(data.codex_accounts.is_empty());
+    }
+
+    #[test]
+    fn multiple_codex_accounts_in_app_usage_data() {
+        let mut data = AppUsageData::default();
+        data.codex_accounts.push(CodexAccountUsage {
+            account_id: "win:~/.codex/auth.json".to_string(),
+            label: "Codex".to_string(),
+            usage: usage_with_session_percent(30.0),
+        });
+        data.codex_accounts.push(CodexAccountUsage {
+            account_id: "wsl:Ubuntu:~/.codex/auth.json".to_string(),
+            label: "Codex (Ubuntu)".to_string(),
+            usage: usage_with_session_percent(70.0),
+        });
+        assert_eq!(data.codex_accounts.len(), 2);
+        assert_eq!(data.codex_accounts[0].usage.session.percentage, 30.0);
+        assert_eq!(data.codex_accounts[1].usage.session.percentage, 70.0);
+    }
+
+    #[test]
+    fn app_is_past_reset_with_multiple_codex_accounts() {
+        let mut data = AppUsageData::default();
+        let past = SystemTime::now() - Duration::from_secs(60);
+        // First account: not past reset
+        data.codex_accounts.push(CodexAccountUsage {
+            account_id: "a".to_string(),
+            label: "A".to_string(),
+            usage: UsageData {
+                session: UsageSection {
+                    percentage: 50.0,
+                    resets_at: Some(SystemTime::now() + Duration::from_secs(3600)),
+                },
+                weekly: UsageSection::default(),
+            },
+        });
+        assert!(!app_is_past_reset(&data));
+        // Second account: past reset
+        data.codex_accounts.push(CodexAccountUsage {
+            account_id: "b".to_string(),
+            label: "B".to_string(),
+            usage: UsageData {
+                session: UsageSection {
+                    percentage: 50.0,
+                    resets_at: Some(past),
+                },
+                weekly: UsageSection::default(),
+            },
+        });
+        assert!(app_is_past_reset(&data));
+    }
 }

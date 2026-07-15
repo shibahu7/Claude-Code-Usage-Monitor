@@ -12,7 +12,6 @@ pub(super) const STRINGS: Strings = Strings {
     one_hour: "1 Hora",
     models: "Modelos",
     claude_code_model: "Claude Code",
-    codex_model: "Codex",
     antigravity_model: "Antigravity",
     settings: "Configurações",
     start_with_windows: "Iniciar com o Windows",
@@ -45,7 +44,6 @@ pub(super) const STRINGS: Strings = Strings {
     codex_token_expired_body: "Execute 'codex' em um terminal e siga as instruções de login. Depois disso, atualize ou reinicie este aplicativo.",
     antigravity_token_expired_title: "Erro de Autenticação do Antigravity",
     antigravity_token_expired_body: "Abra o Antigravity e entre novamente. Depois disso, atualize ou reinicie este aplicativo.",
-    codex_window_title: "Monitor de uso do Codex",
     antigravity_window_title: "Monitor de uso do Antigravity",
     codex_account_prefix: "Codex",
 };

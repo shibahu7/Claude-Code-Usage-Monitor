@@ -146,7 +146,6 @@ pub struct Strings {
     pub one_hour: &'static str,
     pub models: &'static str,
     pub claude_code_model: &'static str,
-    pub codex_model: &'static str,
     pub antigravity_model: &'static str,
     pub settings: &'static str,
     pub start_with_windows: &'static str,
@@ -179,7 +178,6 @@ pub struct Strings {
     pub codex_token_expired_body: &'static str,
     pub antigravity_token_expired_title: &'static str,
     pub antigravity_token_expired_body: &'static str,
-    pub codex_window_title: &'static str,
     pub antigravity_window_title: &'static str,
     pub codex_account_prefix: &'static str,
 }
