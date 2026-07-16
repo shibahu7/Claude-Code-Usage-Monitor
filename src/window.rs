@@ -84,6 +84,7 @@ struct AppState {
     last_update_check_unix: Option<u64>,
 
     taskbar_index: usize,
+    taskbar_monitor_id: Option<String>,
     tray_offset: i32,
     dragging: bool,
     drag_start_mouse_x: i32,
@@ -122,6 +123,7 @@ const IDM_FREQ_1HOUR: u16 = 13;
 const IDM_START_WITH_WINDOWS: u16 = 20;
 const IDM_RESET_POSITION: u16 = 30;
 const IDM_VERSION_ACTION: u16 = 31;
+const IDM_TASKBAR_BASE: u16 = 100;
 const IDM_LANG_SYSTEM: u16 = 40;
 const IDM_LANG_ENGLISH: u16 = 41;
 const IDM_LANG_DUTCH: u16 = 42;
@@ -319,6 +321,8 @@ struct SettingsFile {
     tray_offset: i32,
     #[serde(default)]
     taskbar_index: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    taskbar_monitor_id: Option<String>,
     #[serde(default = "default_poll_interval")]
     poll_interval_ms: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -342,6 +346,7 @@ impl Default for SettingsFile {
         Self {
             tray_offset: 0,
             taskbar_index: 0,
+            taskbar_monitor_id: None,
             poll_interval_ms: default_poll_interval(),
             language: None,
             last_update_check_unix: None,
@@ -430,6 +435,7 @@ fn save_state_settings() {
         save_settings(&SettingsFile {
             tray_offset: s.tray_offset,
             taskbar_index: s.taskbar_index,
+            taskbar_monitor_id: s.taskbar_monitor_id.clone(),
             poll_interval_ms: s.poll_interval_ms,
             language: s
                 .language_override
@@ -553,15 +559,27 @@ fn toggle_widget_visibility(hwnd: HWND) {
     }
 }
 
-fn attach_to_taskbar(hwnd: HWND, requested_index: usize) -> bool {
+fn attach_to_taskbar(
+    hwnd: HWND,
+    requested_monitor_id: Option<&str>,
+    requested_index: usize,
+) -> bool {
     let taskbars = native_interop::find_taskbars();
     if taskbars.is_empty() {
         diagnose::log("taskbar not found; using fallback popup window");
         return false;
     }
 
-    let index = requested_index.min(taskbars.len().saturating_sub(1));
-    let taskbar = taskbars[index];
+    // The old saved index changes meaning if display geometry changes. Prefer
+    // the display device name and retain the index only for legacy settings.
+    let index = requested_monitor_id
+        .and_then(|id| {
+            taskbars
+                .iter()
+                .position(|taskbar| taskbar.monitor_id.as_deref() == Some(id))
+        })
+        .unwrap_or_else(|| requested_index.min(taskbars.len().saturating_sub(1)));
+    let taskbar = taskbars[index].clone();
     diagnose::log(format!(
         "taskbar selected index={index} count={} hwnd={:?} rect=({}, {}, {}, {})",
         taskbars.len(),
@@ -605,6 +623,7 @@ fn attach_to_taskbar(hwnd: HWND, requested_index: usize) -> bool {
         s.tray_notify_hwnd = tray_notify;
         s.win_event_hook = hook;
         s.taskbar_index = index;
+        s.taskbar_monitor_id = taskbar.monitor_id.clone();
         s.embedded = true;
     }
     true
@@ -1657,6 +1676,7 @@ pub fn run() {
                 update_status: UpdateStatus::Idle,
                 last_update_check_unix: settings.last_update_check_unix,
                 taskbar_index: settings.taskbar_index,
+                taskbar_monitor_id: settings.taskbar_monitor_id.clone(),
                 tray_offset: settings.tray_offset,
                 dragging: false,
                 drag_start_mouse_x: 0,
@@ -1670,8 +1690,16 @@ pub fn run() {
         }
 
         // Try to embed in taskbar
-        if attach_to_taskbar(hwnd, settings.taskbar_index) {
+        if attach_to_taskbar(
+            hwnd,
+            settings.taskbar_monitor_id.as_deref(),
+            settings.taskbar_index,
+        ) {
             embedded = true;
+            // Migrate legacy index-only settings as soon as a taskbar has
+            // been resolved, so later display rearrangements cannot change
+            // their meaning.
+            save_state_settings();
         }
 
         // If not embedded, fall back to topmost popup with SetLayeredWindowAttributes
@@ -2897,7 +2925,7 @@ unsafe extern "system" fn wnd_proc(
                                 s.tray_offset = new_offset;
                             }
                         }
-                        if attach_to_taskbar(hwnd, target_index) {
+                        if attach_to_taskbar(hwnd, None, target_index) {
                             position_at_taskbar();
                             render_layered();
                         }
@@ -2984,6 +3012,22 @@ unsafe extern "system" fn wnd_proc(
                     }
                     save_state_settings();
                     position_at_taskbar();
+                }
+                id if (IDM_TASKBAR_BASE..IDM_TASKBAR_BASE + 32).contains(&id) => {
+                    let target_index = (id - IDM_TASKBAR_BASE) as usize;
+                    // Always reset on an explicitly selected monitor. This is
+                    // the recovery path when drag-and-drop is unavailable.
+                    {
+                        let mut state = lock_state();
+                        if let Some(s) = state.as_mut() {
+                            s.tray_offset = 0;
+                        }
+                    }
+                    if attach_to_taskbar(hwnd, None, target_index) {
+                        save_state_settings();
+                        position_at_taskbar();
+                        render_layered();
+                    }
                 }
                 IDM_START_WITH_WINDOWS => {
                     set_startup_enabled(!is_startup_enabled());
@@ -3172,6 +3216,7 @@ fn show_context_menu(hwnd: HWND) {
             enabled_codex_accounts,
             discovered_codex_accounts,
             show_antigravity,
+            current_taskbar_hwnd,
         ) = {
             let state = lock_state();
             match state.as_ref() {
@@ -3187,6 +3232,7 @@ fn show_context_menu(hwnd: HWND) {
                     s.enabled_codex_accounts.clone(),
                     s.discovered_codex_accounts.clone(),
                     s.show_antigravity,
+                    s.taskbar_hwnd,
                 ),
                 None => (
                     POLL_15_MIN,
@@ -3200,6 +3246,7 @@ fn show_context_menu(hwnd: HWND) {
                     Vec::new(),
                     Vec::new(),
                     false,
+                    None,
                 ),
             }
         };
@@ -3322,6 +3369,36 @@ fn show_context_menu(hwnd: HWND) {
             IDM_RESET_POSITION as usize,
             PCWSTR::from_raw(reset_pos_str.as_ptr()),
         );
+
+        // Do not make recovery from a misplaced widget depend on dragging a
+        // child window across monitors.  A taskbar is a stable, explicit
+        // destination even if the monitor layout has changed.
+        let taskbars = native_interop::find_taskbars();
+        if taskbars.len() > 1 {
+            let taskbar_menu = CreatePopupMenu().unwrap();
+            for (index, taskbar) in taskbars.iter().enumerate().take(32) {
+                let label = format!("{} {}", strings.move_to_monitor, index + 1);
+                let label_str = native_interop::wide_str(&label);
+                let flags = if Some(taskbar.hwnd) == current_taskbar_hwnd {
+                    MF_CHECKED
+                } else {
+                    MENU_ITEM_FLAGS(0)
+                };
+                let _ = AppendMenuW(
+                    taskbar_menu,
+                    flags,
+                    (IDM_TASKBAR_BASE as usize) + index,
+                    PCWSTR::from_raw(label_str.as_ptr()),
+                );
+            }
+            let taskbar_label = native_interop::wide_str(strings.move_to_monitor);
+            let _ = AppendMenuW(
+                settings_menu,
+                MF_POPUP,
+                taskbar_menu.0 as usize,
+                PCWSTR::from_raw(taskbar_label.as_ptr()),
+            );
+        }
 
         let language_menu = CreatePopupMenu().unwrap();
         let system_label = native_interop::wide_str(strings.system_default);
